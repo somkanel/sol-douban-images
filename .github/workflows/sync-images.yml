@@ -1,0 +1,33 @@
+name: sync posters
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 15 * * *'
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Download Posters
+        run: |
+          mkdir -p posters
+          # 从数据仓库拉取 JSON
+          curl -s "https://raw.githubusercontent.com/somkanel/sol-douban-data/main/data/movie.json" -o movie.json
+          # 提取所有豆瓣图片链接并下载
+          grep -oE 'https://img[0-9].doubanio.com/[^"]+' movie.json | sort | uniq | while read url; do
+            filename=$(basename "$url" | cut -d'?' -f1)
+            if [ ! -f "posters/$filename" ]; then
+              echo "Downloading $filename..."
+              curl -s -L -H "Referer: https://www.douban.com" "$url" -o "posters/$filename" || true
+            fi
+          done
+          rm -f movie.json
+
+      - name: Commit and Push
+        uses: EndBug/add-and-commit@v9
+        with:
+          message: 'chore: sync posters'
+          add: '.'
+          default_author: github_actions
