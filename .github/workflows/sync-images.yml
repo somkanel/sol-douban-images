@@ -1,32 +1,129 @@
-
 name: sync posters
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 15 * * *'
+    # GitHub cron uses UTC. 15:30 UTC = 23:30 Asia/Shanghai
+    - cron: "30 15 * * *"
+
+concurrency:
+  group: sync-posters
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Image Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Download Posters
+      - name: Sync posters incrementally
+        shell: bash
         run: |
+          set -Eeuo pipefail
+
           mkdir -p posters
-          curl -s "https://raw.githubusercontent.com/somkanel/sol-douban-data/main/data/movie.json" -o /tmp/movie.json
-          grep -oE 'https://img[0-9].doubanio.com/[^"]+' /tmp/movie.json | sort | uniq | while read url; do
-            filename=$(basename "$url" | cut -d'?' -f1)
-            if [ ! -f "posters/$filename" ]; then
-              echo "Downloading $filename..."
-              curl -s -L -H "Referer: https://www.douban.com" "$url" -o "posters/$filename" || true
+          tmp_json="$(mktemp)"
+          tmp_dir="$(mktemp -d)"
+
+          DATA_JSON_URL="https://raw.githubusercontent.com/somkanel/sol-douban-data/main/data/movie.json"
+
+          echo "Fetching movie.json..."
+          curl -fSL --retry 5 --retry-delay 2 --retry-all-errors \
+            "$DATA_JSON_URL" -o "$tmp_json"
+
+          echo "Extracting subject.id + poster url (normal preferred)..."
+          # Output: "<id>\t<url>"
+          jq -r '.[] | select(.subject.id != null) | "\(.subject.id)\t\(.subject.pic.normal // .subject.pic.large // "")"' \
+            "$tmp_json" \
+            | awk -F'\t' 'NF==2 && $2 ~ /^https?:\/\// {print $1 "\t" $2}' \
+            | sort -u > "$tmp_dir/list.tsv"
+
+          total="$(wc -l < "$tmp_dir/list.tsv" | tr -d ' ')"
+          echo "Found $total subjects with poster urls."
+
+          downloaded=0
+          skipped=0
+          failed=0
+
+          download_one () {
+            local id="$1"
+            local url="$2"
+
+            local path="${url%%\?*}"
+            local ext="${path##*.}"
+            if [[ "$ext" == "$path" ]] || [[ ! "$ext" =~ ^(jpg|jpeg|png|webp)$ ]]; then
+              ext="jpg"
             fi
-          done
-          rm -f /tmp/movie.json
+            if [[ "$ext" == "jpeg" ]]; then ext="jpg"; fi
+
+            local dest="posters/${id}.${ext}"
+            local tmp_file="${dest}.tmp"
+
+            # If file exists and looks valid, skip
+            if [[ -f "$dest" ]]; then
+              local size
+              size="$(wc -c < "$dest" | tr -d ' ')"
+              if [[ "$size" -ge 4096 ]]; then
+                skipped=$((skipped+1))
+                return 0
+              fi
+              # Existing but too small -> treat as corrupted and re-download
+              rm -f "$dest"
+            fi
+
+            echo "Downloading: $id -> $dest"
+            if curl -fSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -H "Referer: https://www.douban.com" \
+              --connect-timeout 10 --max-time 60 \
+              "$url" -o "$tmp_file"; then
+
+              local size
+              size="$(wc -c < "$tmp_file" | tr -d ' ')"
+              if [[ "$size" -lt 4096 ]]; then
+                echo "Invalid (too small): $dest ($size bytes)"
+                rm -f "$tmp_file"
+                failed=$((failed+1))
+                return 0
+              fi
+
+              local mime
+              mime="$(file -b --mime-type "$tmp_file" || true)"
+              if [[ "$mime" != image/* ]]; then
+                echo "Invalid mime ($mime): $dest"
+                rm -f "$tmp_file"
+                failed=$((failed+1))
+                return 0
+              fi
+
+              mv -f "$tmp_file" "$dest"
+              downloaded=$((downloaded+1))
+              return 0
+            else
+              echo "Download failed: $id"
+              rm -f "$tmp_file"
+              failed=$((failed+1))
+              return 0
+            fi
+          }
+
+          # Sequential download (safe). Since incremental, usually only a few new items per day.
+          while IFS=$'\t' read -r id url; do
+            [[ -z "$id" || -z "$url" ]] && continue
+            download_one "$id" "$url"
+          done < "$tmp_dir/list.tsv"
+
+          rm -f "$tmp_json"
+          rm -rf "$tmp_dir"
+
+          echo "Done. downloaded=$downloaded skipped=$skipped failed=$failed"
 
       - name: Commit and Push
         uses: EndBug/add-and-commit@v9
         with:
-          message: 'chore: sync posters'
-          add: './posters'
+          message: "chore: sync posters"
+          add: "./posters"
           default_author: github_actions
