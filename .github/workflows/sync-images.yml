@@ -2,9 +2,10 @@ name: sync posters
 
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub cron uses UTC. 15:30 UTC = 23:30 Asia/Shanghai
-    - cron: "30 15 * * *"
+  workflow_run:
+    workflows: ["douban sync"]
+    types:
+      - completed
 
 concurrency:
   group: sync-posters
@@ -15,6 +16,8 @@ permissions:
 
 jobs:
   sync:
+    # Only run when the upstream workflow succeeded
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Image Repo
