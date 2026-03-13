@@ -1,11 +1,8 @@
 name: sync posters
 
 on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["douban sync"]
-    types:
-      - completed
+  workflow_dispatch:  # 保留手动触发功能（用于测试和手动运行）
+  # workflow_run 已移除，因为它无法跨仓库触发（sol-douban-data 和 sol-douban-images 是两个不同的仓库）
 
 concurrency:
   group: sync-posters
@@ -16,8 +13,9 @@ permissions:
 
 jobs:
   sync:
-    # Only run when the upstream workflow succeeded
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # 当通过 workflow_dispatch 手动触发时正常运行
+    # （不再需要判断 workflow_run 的 success，因为现在由上游主动触发）
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Image Repo
